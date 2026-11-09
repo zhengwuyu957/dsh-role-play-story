@@ -1,0 +1,4 @@
+- insert:
+    - id: roleplay-story
+      name: dsh-role-play-story
+      config: {}
