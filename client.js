@@ -63,8 +63,9 @@ window.__ModuleLoader__.load({
       genFailed: '生成失败，请重试。',
       genKeywords: '故事情节',
       genKeywordsPlaceholder: '例如：三个人被困在停电的公寓，旧情敌突然出现',
-      genKeywordsHint: '描述你想要的情节，AI 会自动筛选角色并生成背景。',
-      genStart: '生成故事',
+      genKeywordsHint: '描述你想要的情节，AI 会从零创作故事背景和 2～4 个全新角色，不使用你已有的角色卡。',
+      genStart: '生成故事与角色',
+      genCreatesCards: '生成的角色会自动加进「角色扮演」里，可以随时修改。',
       editStory: '编辑',
     }
 
@@ -299,42 +300,124 @@ window.__ModuleLoader__.load({
       return segments.map((s) => ({ ...s, text: s.text.trim() }))
     }
 
-    /** 故事生成：根据情节描述，挑选角色并生成背景。 */
+    /**
+     * 故事生成：完全从零创作角色，根据情节描述产出故事背景与 2～4 张全新角色卡。
+     * 不参考、不复用已有角色卡——用户要的是 AI 原创的整套阵容。
+     * 失败时通过 lastGenError 暴露原因，便于界面显示具体卡点。
+     */
+    let lastGenError = ''
     async function generateStory(plot, chars, hub) {
-      const roster = chars
-        .map((c) => `- ${c.name}${c.persona ? `：${c.persona.slice(0, 120)}` : ''}`)
-        .join('\n')
-      const system = `你是故事策划。根据用户给的情节和现有角色名单，设计一个多角色故事。
-只输出 JSON，不要解释、不要代码块标记、不要嵌套。字段名必须用英文键：
-{"title":"故事标题（10字内）","scene":"故事背景，150-250字，写清时间地点、角色之间的关系、当前的矛盾或处境","cast":["角色名1","角色名2"]}
-cast 只能从给定名单里选 2～4 个名字，选最适合这个情节的。`
-      const userText = `【可选用角色】\n${roster}\n\n【想要的情节】\n${plot}`
-      const raw = await hub.complete(system, userText, { temperature: 0.9, maxTokens: 900 })
-      if (raw === null) return null
+      lastGenError = ''
+      // 只把已有角色的名字当作「避让名单」，防止新建的重名导致管理混乱。
+      const taken =
+        Array.isArray(chars) && chars.length > 0
+          ? chars
+              .map((c) => (typeof c?.name === 'string' ? c.name.trim() : ''))
+              .filter((n) => n !== '')
+              .join('、')
+          : ''
+      const system = `你是多角色群像故事的策划，负责从零创作一个故事和它的全部角色。
+
+【最重要的前提】
+所有角色都由你原创。不要使用任何现实中的公众人物，也不要假定用户已经有现成的角色。
+如果用户消息里给了【避让名单】，那些名字已被占用，你起名时要避开。
+
+必须只输出一个 JSON 对象，不要解释、不要代码块标记、不要嵌套（所有字段都是字符串，只有 cast 是数组）。
+字段名必须使用下列英文键，不要翻译成中文：
+{"title":"故事标题，10字内","scene":"故事背景，180-280字，写清时间地点、角色之间的旧有关系、当前引爆矛盾的处境","cast":[{"name":"角色名","avatar":"一个贴切的 emoji","persona":"人物设定，200-350字，写清性格、说话方式、背景、习惯动作、口癖","desire":"这个角色在这个故事里想要什么，30-60字","guard":"这个角色的心理防线，30-60字"}]}
+
+字数要求是硬性的：persona 一定要写满 200 字以上，写清楚性格层次、说话的具体方式（口癖、句长、用词习惯）、身份背景、习惯动作。写不到 200 字说明你偷懒了，重写。
+
+要求：
+- cast 输出 2～4 个角色，人数按情节需要定，不要凑数。
+- 每个角色都要有完整的来历：姓名、身份、在这个故事里的位置，不要写「角色A」这类占位名。
+- 角色之间必须有现成的张力：旧怨、暗恋、竞争、上下级、隐瞒的秘密，任选其一并落到实处。
+- 每个角色的性格和说话方式要明显不同，不要写成同一个人换了名字。
+- avatar 必须是一个真实存在的 emoji 字符（如 🩸、🌙、🕯️），不要写文字描述。
+- greeting 不需要输出。
+- 角色彼此之间要有自己的关系和目的，不要写成围着用户转的工具人。
+- 用户给的情节如果已经点名了角色或身份，就按用户的设定来写，不要另起一套。`
+      const userText =
+        (taken === '' ? '' : `【避让名单：这些名字已被占用，新角色不要重名】\n${taken}\n\n`) +
+        `【想要的情节】\n${plot}`
+      let raw = null
+      try {
+        raw = await hub.complete(system, userText, { temperature: 0.95, maxTokens: 2800 })
+      } catch (e) {
+        lastGenError = `模型调用抛错：${e instanceof Error ? e.message : String(e)}`
+        return null
+      }
+      if (raw === null || typeof raw !== 'string' || raw.trim() === '') {
+        const hint = typeof hub.lastError === 'string' && hub.lastError !== '' ? `（${hub.lastError}）` : ''
+        lastGenError = `模型没有返回内容${hint}`
+        return null
+      }
       try {
         const cleaned = raw.replace(/```json|```/g, '').trim()
         const s = cleaned.indexOf('{')
         const e = cleaned.lastIndexOf('}')
-        if (s === -1 || e === -1) return null
+        if (s === -1 || e === -1) {
+          lastGenError = `模型输出里找不到 JSON 对象。开头是：${cleaned.slice(0, 80)}`
+          return null
+        }
         const p = JSON.parse(cleaned.slice(s, e + 1))
         let src = p
         const keys = Object.keys(src)
         if (keys.length === 1 && src[keys[0]] && typeof src[keys[0]] === 'object' && !Array.isArray(src[keys[0]])) src = src[keys[0]]
-        const str = (v) => (typeof v === 'string' ? v.trim() : '')
+        const str = (v) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '')
         const title = str(src.title) || str(src['标题']) || str(src['故事标题'])
         const scene = str(src.scene) || str(src['背景']) || str(src['故事背景']) || str(src['情节'])
-        const rawCast = src.cast || src['角色'] || src['角色名单'] || []
-        const cast = Array.isArray(rawCast) ? rawCast.map((x) => String(x).trim()).filter(Boolean) : []
-        if (title === '' && scene === '') return null
-        // 只保留真实存在的角色名
-        const valid = cast.filter((n) => chars.some((c) => c.name === n))
-        return {
-          title: title || '未命名故事',
-          scene,
-          characterIds: valid.length >= 2 ? chars.filter((c) => valid.includes(c.name)).map((c) => c.id) : [],
+        const rawCast = src.cast || src['角色'] || src['角色名单'] || src['出场角色'] || []
+        // 兼容三种写法：完整角色对象数组、纯名字字符串数组、单个对象。
+        const list = Array.isArray(rawCast) ? rawCast : rawCast && typeof rawCast === 'object' ? [rawCast] : []
+        const cast = list.map(normalizeCastCard).filter(Boolean).slice(0, 4)
+        if (title === '' && scene === '') {
+          lastGenError = `JSON 里没有标题和背景。字段是：${Object.keys(src).join(', ')}`
+          return null
         }
-      } catch {
+        if (cast.length === 0) {
+          lastGenError = `没有可用的角色卡。cast 字段：${JSON.stringify(rawCast).slice(0, 120)}`
+          return null
+        }
+        return { title: title || '未命名故事', scene, cast }
+      } catch (e) {
+        lastGenError = `JSON 解析失败：${e instanceof Error ? e.message : String(e)}｜原文开头：${raw.slice(0, 120)}`
         return null
+      }
+    }
+
+    /** 把模型给的一个角色对象规整成角色卡，中文字段名和纯字符串都认。 */
+    function normalizeCastCard(raw) {
+      // 模型只给了名字时，先造一张只有名字的卡，细节留空由用户补。
+      if (typeof raw === 'string') {
+        const only = raw.trim()
+        if (only === '') return null
+        return { name: only, avatar: '🎭', persona: '', scenario: '', greeting: '', desire: '', guard: '' }
+      }
+      if (raw === null || typeof raw !== 'object') return null
+      let src = raw
+      const keys = Object.keys(src)
+      if (keys.length === 1 && src[keys[0]] && typeof src[keys[0]] === 'object' && !Array.isArray(src[keys[0]])) src = src[keys[0]]
+      const str = (v) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '')
+      const pick = (alias) => {
+        for (const k of alias) {
+          const v = str(src[k])
+          if (v !== '') return v
+        }
+        return ''
+      }
+      const name = pick(['name', '名字', '姓名', '角色名', '角色'])
+      if (name === '') return null
+      const avatarRaw = pick(['avatar', '头像', 'emoji', '表情'])
+      const avatar = /^[\p{Extended_Pictographic}\uFE0F]{1,4}$/u.test(avatarRaw) ? avatarRaw : '🎭'
+      return {
+        name,
+        avatar,
+        persona: pick(['persona', '人设', '人物设定', '性格', '设定', '角色设定']),
+        scenario: pick(['scenario', '情景', '世界观', '场景', '背景设定']),
+        greeting: pick(['greeting', '开场白']),
+        desire: pick(['desire', '欲望', '想要什么', '动机', '渴望']),
+        guard: pick(['guard', '防线', '心理防线', '防备']),
       }
     }
 
@@ -496,7 +579,55 @@ cast 只能从给定名单里选 2～4 个名字，选最适合这个情节的�
         [t],
       )
 
-      // 生成故事：根据情节自动选角并生成背景
+      /**
+       * 把生成出来的角色卡落进主插件：全部当作原创新建，不套用旧角色。
+       * @param {object[]} cast 生成的角色卡
+       * @param {object} hub 主插件共享接口
+       * @param {string} scene 故事背景，用来补全新卡缺失的情景字段
+       * @returns {string[]} 可用于 story.characterIds 的 id 列表
+       */
+      const materializeCast = useCallback((cast, hub, scene) => {
+        const ids = []
+        const live = hub.getCharacters()
+        const backdrop = typeof scene === 'string' ? scene.trim() : ''
+        const hasCreate = typeof hub.createCharacter === 'function'
+        let created = 0
+        let failed = 0
+        for (const card of cast) {
+          const name = (card?.name ?? '').trim()
+          if (name === '') continue
+          // 生成模式要求「完全原创」：即使碰巧同名，也新建一张独立的卡，
+          // 否则会悄悄套用旧角色的人设，和用户看到的情节对不上。
+          const clash = live.some((c) => c.name === name)
+          if (!hasCreate) {
+            failed += 1
+            continue
+          }
+          // 单独打开这张卡聊天时也要有背景，所以把故事背景写进 scenario。
+          const payload = {
+            ...card,
+            ...(backdrop !== '' && (card.scenario ?? '').trim() === '' ? { scenario: backdrop } : {}),
+            // 重名时加后缀，既保留原创设定，也不会和旧卡混淆。
+            ...(clash ? { name: `${name}（新生）` } : {}),
+          }
+          const made = hub.createCharacter(payload)
+          if (made && typeof made.id === 'string') {
+            live.push(made)
+            created += 1
+            if (!ids.includes(made.id)) ids.push(made.id)
+          } else {
+            failed += 1
+          }
+        }
+        if (created === 0 && failed > 0) {
+          lastGenError = hasCreate
+            ? `角色卡写入失败（${failed} 个）。可能是「角色扮演」插件未启用。`
+            : '「角色扮演」插件没有提供建卡接口，请确认它已启用并刷新页面。'
+        }
+        return ids
+      }, [])
+
+      // 生成故事：根据情节自动生成背景与角色卡，并把角色写进主插件的角色列表
       const runGenerateStory = useCallback(async () => {
         if (!hubRef.current || generatingStory) return
         const plot = createPlot.trim()
@@ -506,11 +637,21 @@ cast 只能从给定名单里选 2～4 个名字，选最适合这个情节的�
         try {
           const draft = await generateStory(plot, characters, hubRef.current)
           if (draft === null) {
-            setCreateError(t('genFailed'))
+            setCreateError(lastGenError !== '' ? lastGenError : t('genFailed'))
             return
           }
-          const characterIds =
-            draft.characterIds.length >= 2 ? draft.characterIds : characters.slice(0, Math.min(3, characters.length)).map((c) => c.id)
+          const characterIds = materializeCast(draft.cast, hubRef.current, draft.scene)
+          // 只用本次生成的原创角色，不拿旧角色凑数——这才能保证阵容完全来自 AI。
+          if (characterIds.length < 2) {
+            setCreateError(
+              lastGenError !== ''
+                ? lastGenError
+                : `${t('genFailed')}（AI 只生成了 ${characterIds.length} 个角色，至少需要 2 个，请重新生成）`,
+            )
+            return
+          }
+          // 新卡刚写进主插件，立刻拉一次快照，否则编辑器的角色 chips 会缺新角色。
+          setCharacters(hubRef.current.getCharacters())
           setCreateOpen(false)
           setCreatePlot('')
           setEditing({
@@ -523,7 +664,7 @@ cast 只能从给定名单里选 2～4 个名字，选最适合这个情节的�
         } finally {
           setGeneratingStory(false)
         }
-      }, [createPlot, characters, generatingStory, t])
+      }, [createPlot, characters, generatingStory, t, materializeCast])
 
       const startNew = () => setEditing({ id: undefined, title: '', scene: '', characterIds: [], messages: [] })
 
@@ -666,7 +807,8 @@ cast 只能从给定名单里选 2～4 个名字，选最适合这个情节的�
         ),
       )
 
-      // 没有主插件 / 没有角色卡时不进入主界面
+      // 没有主插件时无法读写角色卡，直接给出提示。
+      // 角色卡数量不再拦截：新建故事时可以让 AI 直接生成角色。
       if (hub === null) {
         return h(
           'div',
@@ -681,25 +823,6 @@ cast 只能从给定名单里选 2～4 个名字，选最适合这个情节的�
               h('div', { style: { fontSize: '30px' } }, '🔌'),
               h('div', { style: { fontWeight: 600 } }, t('needMain')),
               h('div', null, t('needMainHint')),
-            ),
-          ),
-        )
-      }
-
-      if (characters.length < 2) {
-        return h(
-          'div',
-          { className: 'rp-anchor' },
-          h(
-            'div',
-            { className: 'rp-root' },
-            h('style', null, STYLE),
-            h(
-              'div',
-              { className: 'rp-placeholder', style: { flex: 1 } },
-              h('div', { style: { fontSize: '30px' } }, '👥'),
-              h('div', { style: { fontWeight: 600 } }, t('needCharacters')),
-              h('div', null, t('needCharactersHint')),
             ),
           ),
         )
@@ -781,6 +904,7 @@ cast 只能从给定名单里选 2～4 个名字，选最适合这个情节的�
               onChange: (e) => setPlot(e.target.value),
             }),
             h('div', { className: 'rp-hint' }, t('genKeywordsHint')),
+            h('div', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', opacity: 0.85 } }, t('genCreatesCards')),
             error === '' ? null : h('div', { className: 'rp-err-text' }, error),
             h(
               'div',
