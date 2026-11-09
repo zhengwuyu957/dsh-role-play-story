@@ -1,7 +1,7 @@
 {
   "name": "dsh-role-play-story",
-  "version": "1.0.0",
-  "description": "多角色故事模式：让多个角色同场互动。需要先安装 dsh-role-play。",
+  "version": "1.1.0",
+  "description": "多角色故事模式：让多个角色同场互动。需要先安装 dsh-role-play。模型使用跟随角色扮演插件。故事与对话记录保存在浏览器本地存储，不写任何文件。",
   "type": "module",
   "license": "MIT",
   "keywords": ["dsh", "deepseek-harness", "plugin", "roleplay", "story", "multi-character"],

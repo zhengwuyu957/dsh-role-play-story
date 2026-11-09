@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Multi-character story",
-    "description": "A story mode where several characters interact together. Requires the Roleplay chat plugin."
+    "description": "A story mode where several characters interact together. Requires the Roleplay chat plugin, and uses the same model it is set to. Stories and their conversations are kept in the browser's local storage: nothing is written to disk."
   }
 }

@@ -35,6 +35,10 @@ window.__ModuleLoader__.load({
       storySceneHint: '写清时间、地点、你们的关系和处境，角色们会围绕这个背景展开。',
       pickCharacters: '选择出场的角色',
       pickCharactersHint: '至少选两个，才能有角色之间的互动。',
+      playAs: '你扮演谁',
+      playAsHint: '选一个角色当作故事里的「你」。选中的角色由你来说话，AI 不再替他开口。',
+      playAsNone: '玩家旁观（所有人都由 AI 演）',
+      playAsMine: '你',
       modeTurn: '轮流',
       modeFree: '自由',
       modeTurnDesc: '每次由模型决定谁开口，一人一段',
@@ -55,7 +59,7 @@ window.__ModuleLoader__.load({
       errorModel: '模型调用失败',
       fabricated: '生成中…',
       generating: '正在生成…',
-      emptyStory: '故事从这里开始。',
+      emptyStory: '还没有开场。点右上角「编辑」可以生成开场白，或者你直接说第一句话。',
       charsCount: '个角色',
       autoOn: '自动续演中',
       stopAuto: '停止',
@@ -67,6 +71,14 @@ window.__ModuleLoader__.load({
       genStart: '生成故事与角色',
       genCreatesCards: '生成的角色会自动加进「角色扮演」里，可以随时修改。',
       editStory: '编辑',
+      openingLabel: '开场白',
+      openingEmpty: '还没有开场白。点下面的按钮让 AI 写一段，故事就能直接开演。',
+      openingGen: '生成开场白',
+      openingRegen: '重新生成',
+      openingClear: '清空',
+      openingGenerating: '正在写…',
+      openingFailed: '开场白生成失败，请重试。',
+      openingHint: '开场白是故事开始时看到的发言，会出现在聊天区最前面。',
     }
 
     const STYLE = `
@@ -139,6 +151,8 @@ window.__ModuleLoader__.load({
 .rp-choice b{font-size:13px}
 .rp-choice span{font-size:11px;color:var(--dsw-alias-label-secondary)}
 .rp-hint{font-size:11px;color:var(--dsw-alias-label-secondary)}
+.rp-opening-preview{flex:1;min-width:0;max-height:130px;overflow-y:auto;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.rp-opening-name{color:var(--dsw-alias-brand-primary);font-weight:600}
 .rp-err-text{font-size:12px;color:var(--dsw-alias-state-error-primary)}
 `
 
@@ -225,12 +239,24 @@ window.__ModuleLoader__.load({
 然后换行写这个角色的台词与动作。
 - 同一段里不要出现两个 [[角色名]]。
 - 只能使用下面给定的角色名，不要自创角色。
+- 如果上面说明了某个角色由用户扮演，就不要为他生成任何段落。
 - 旁白（场景变化、环境描写）用 [[旁白]] 开头。
 - 每轮输出 2～4 段，让角色之间有来有回；不要一个人说完整场。`
 
     function buildStoryPrompt(story, chars, mode) {
-      const names = chars.map((c) => c.name)
-      const castDesc = chars
+      const st = story && typeof story === 'object' ? story : {}
+      const list = Array.isArray(chars) ? chars.filter((c) => c && typeof c.name === 'string') : []
+      const names = list.map((c) => c.name)
+      // st.playAsId 指向「由用户来演」的那个角色；没有就是全员 AI。
+      const playerChar = list.find((c) => c.id === st.playAsId) ?? null
+      const aiCast = playerChar === null ? list : list.filter((c) => c.id !== playerChar.id)
+      // 用户在这个故事里演的是 playerChar，所以他的性别就等于这个角色的性别。
+      const known = playerChar?.gender === '男' || playerChar?.gender === '女' ? playerChar.gender : ''
+      const genderLine =
+        known === ''
+          ? '用户的性别未说明，不要擅自假设，用中性说法（如「你」「对方」）。'
+          : `用户是${known === '男' ? '男性' : '女性'}，提到他的性别特征或被他人称呼时用「${known === '男' ? '他' : '她'}」相关的说法，不要搞错。`
+      const castDesc = list
         .map((c) => {
           const bits = [`名字：${c.name}`]
           if (c.persona) bits.push(`设定：${c.persona}`)
@@ -240,8 +266,27 @@ window.__ModuleLoader__.load({
         })
         .join('\n\n')
       const parts = [`你现在要写一场多角色群像故事。出场角色如下：\n\n${castDesc}`]
-      if (story.scene) parts.push(`【故事背景】\n${story.scene}`)
-      parts.push(`【角色名单】${names.join('、')}`)
+      if (st.scene) parts.push(`【故事背景】\n${st.scene}`)
+
+      if (playerChar !== null) {
+        // 有玩家角色时，这是最重要的一条约束：他的台词归用户，AI 只写别人。
+        parts.push(`【用户扮演的角色（最高优先级）】
+${playerChar.name} 由用户本人在扮演，不是由你写。
+- 绝对不要写 ${playerChar.name} 的台词、动作、心理活动，一行都不要。
+- ${genderLine}
+- 你的任务是把 ${playerChar.name} 之外的角色写好，让他们对 ${playerChar.name} 和彼此做出反应。
+- 用户的发言在对话记录里标记为 [用户]，那就是 ${playerChar.name} 说的话，请当作 ${playerChar.name} 亲口说的来接。
+- 角色们知道 ${playerChar.name} 在场，会看着他、跟他说话、对他有情绪。
+- 把舞台留给 ${playerChar.name}：每轮结尾留一个能让他接话的钩子。`)
+        parts.push(
+          `【角色名单】${names.join('、')}\n（其中 ${playerChar.name} 由用户演，你只写 ${aiCast.map((c) => c.name).join('、')}）`,
+        )
+      } else {
+        parts.push(`【角色名单】${names.join('、')}`)
+        parts.push(`【用户的位置】用户是这一切的旁观者与参与者，所有角色都由你来写。
+- ${genderLine}`)
+      }
+
       parts.push(CAST_FORMAT)
       parts.push(`【角色之间的互动（重点）】
 - 角色之间必须有直接交流：互相接话、反驳、试探、争抢、冷战，不要各自只对用户说话。
@@ -263,10 +308,11 @@ window.__ModuleLoader__.load({
     }
 
     /** 把历史消息拼成模型可读的上下文。 */
-    function buildTranscript(messages) {
+    function buildTranscript(messages, playerName) {
+      const you = typeof playerName === 'string' && playerName !== '' ? playerName : '用户'
       return messages
         .map((m) => {
-          if (m.role === 'user') return `[用户]：${m.text}`
+          if (m.role === 'user') return `[用户/${you}]：${m.text}`
           if (m.role === 'narrator') return `[旁白]：${m.text}`
           return `[${m.speaker || '角色'}]：${m.text}`
         })
@@ -324,7 +370,33 @@ window.__ModuleLoader__.load({
 
 必须只输出一个 JSON 对象，不要解释、不要代码块标记、不要嵌套（所有字段都是字符串，只有 cast 是数组）。
 字段名必须使用下列英文键，不要翻译成中文：
-{"title":"故事标题，10字内","scene":"故事背景，180-280字，写清时间地点、角色之间的旧有关系、当前引爆矛盾的处境","cast":[{"name":"角色名","avatar":"一个贴切的 emoji","persona":"人物设定，200-350字，写清性格、说话方式、背景、习惯动作、口癖","desire":"这个角色在这个故事里想要什么，30-60字","guard":"这个角色的心理防线，30-60字"}]}
+{"title":"故事标题，10字内","scene":"故事背景，180-280字，写清时间地点、角色之间的旧有关系、当前引爆矛盾的处境","youName":"用户在这个故事里扮演的那个角色的名字","opening":"开场白，见下方要求","cast":[{"name":"角色名","avatar":"一个贴切的 emoji","gender":"男 或 女","persona":"人物设定，200-350字，写清性格、说话方式、背景、习惯动作、口癖","desire":"这个角色在这个故事里想要什么，30-60字","guard":"这个角色的心理防线，30-60字"}]}
+
+【开场白 opening（很重要）】
+这是故事开始时用户第一眼看到的内容，必须让人立刻想接话。
+- 用第 2～4 段发言的格式写，每段以 [[角色名]] 独占一行开头，就像故事已经在进行。
+- 必须是 cast 里的角色说的，绝对不要写 youName 那个布色（那是用户本人）。
+- 写 3～5 句台词加动作，制造一个正在发生的小冲突或暧昧瞬间，把场面逼到一个必须回应的点。
+- 动作、神态用全角括号：（她把烟按灭）。
+- 结尾要留出空档，让用户马上有话说。
+- 不要写成旁白介绍，不要交代设定，直接开演。
+格式示例（照这个格式，内容你自己写）：
+[[角色甲]]
+（抬头看你）你来得正好。
+[[角色乙]]
+（把杯子推到你面前）先坐下吧，站着说话不好听。
+
+【用户必须有自己的位置（非常重要）】
+用户在玩这个故事，不是旁观者。你要从 cast 里挑一个角色当作「用户本人扮演的角色」，把它的名字填进 youName。
+- 这个角色是故事的主角之一，是这场戏的核心，其他角色都会围着他转。
+- 他被卷进矛盾中心，有充分的说话动机和改变局势的能力。
+- 在 scene 里用「你」称呼他，写成「你」的处境，不要写成第三人称旁白。
+- youName 必须是 cast 里真实存在的名字之一，不要另起一个。
+
+【JSON 写法（非常重要，违反会导致解析失败）】
+- 字符串内部绝对不要出现英文双引号 "。要引用对话就用中文引号「」或『』。
+- 不要在 JSON 里写注释，字段之间必须有逗号，最后一个字段后面不要加逗号。
+- 每个字段值都必须用英文双引号包住，且整段输出只有一个 JSON 对象。
 
 字数要求是硬性的：persona 一定要写满 200 字以上，写清楚性格层次、说话的具体方式（口癖、句长、用词习惯）、身份背景、习惯动作。写不到 200 字说明你偷懒了，重写。
 
@@ -334,7 +406,7 @@ window.__ModuleLoader__.load({
 - 角色之间必须有现成的张力：旧怨、暗恋、竞争、上下级、隐瞒的秘密，任选其一并落到实处。
 - 每个角色的性格和说话方式要明显不同，不要写成同一个人换了名字。
 - avatar 必须是一个真实存在的 emoji 字符（如 🩸、🌙、🕯️），不要写文字描述。
-- greeting 不需要输出。
+- 每个角色卡片里的 greeting 不需要输出（开场白统一写在 opening 里）。
 - 角色彼此之间要有自己的关系和目的，不要写成围着用户转的工具人。
 - 用户给的情节如果已经点名了角色或身份，就按用户的设定来写，不要另起一套。`
       const userText =
@@ -360,13 +432,37 @@ window.__ModuleLoader__.load({
           lastGenError = `模型输出里找不到 JSON 对象。开头是：${cleaned.slice(0, 80)}`
           return null
         }
-        const p = JSON.parse(cleaned.slice(s, e + 1))
+        let p = null
+        const text = cleaned.slice(s, e + 1)
+        try {
+          p = JSON.parse(text)
+        } catch (first) {
+          // 模型经常在字符串值里写未转义的英文直引号（中文对话引号尤其多），
+          // 直接 JSON.parse 会提前截断。这里做一次修复再试。
+          const repaired = repairJsonQuotes(text)
+          if (repaired !== null) {
+            try {
+              p = JSON.parse(repaired)
+            } catch {
+              p = null
+            }
+          }
+          if (p === null) {
+            lastGenError = `JSON 解析失败：${first instanceof Error ? first.message : String(first)}｜原文开头：${raw.slice(0, 160)}`
+            return null
+          }
+        }
+        if (p === null || typeof p !== 'object') {
+          lastGenError = '模型返回的不是 JSON 对象'
+          return null
+        }
         let src = p
         const keys = Object.keys(src)
         if (keys.length === 1 && src[keys[0]] && typeof src[keys[0]] === 'object' && !Array.isArray(src[keys[0]])) src = src[keys[0]]
         const str = (v) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '')
         const title = str(src.title) || str(src['标题']) || str(src['故事标题'])
         const scene = str(src.scene) || str(src['背景']) || str(src['故事背景']) || str(src['情节'])
+        const youName = str(src.youName) || str(src['you']) || str(src['用户角色']) || str(src['我扮演'])
         const rawCast = src.cast || src['角色'] || src['角色名单'] || src['出场角色'] || []
         // 兼容三种写法：完整角色对象数组、纯名字字符串数组、单个对象。
         const list = Array.isArray(rawCast) ? rawCast : rawCast && typeof rawCast === 'object' ? [rawCast] : []
@@ -379,20 +475,165 @@ window.__ModuleLoader__.load({
           lastGenError = `没有可用的角色卡。cast 字段：${JSON.stringify(rawCast).slice(0, 120)}`
           return null
         }
-        return { title: title || '未命名故事', scene, cast }
+        // youName 必须能在 cast 里找到，否则退化为「第一个角色是玩家」。
+        const hasYou = youName !== '' && cast.some((c) => c.name === youName)
+        const finalYou = hasYou ? youName : (cast[0]?.name ?? '')
+        const opening = str(src.opening) || str(src['开场白']) || str(src['开场'])
+        return {
+          title: title || '未命名故事',
+          scene,
+          cast,
+          youName: finalYou,
+          opening,
+        }
       } catch (e) {
         lastGenError = `JSON 解析失败：${e instanceof Error ? e.message : String(e)}｜原文开头：${raw.slice(0, 120)}`
         return null
       }
     }
 
-    /** 把模型给的一个角色对象规整成角色卡，中文字段名和纯字符串都认。 */
+    /**
+     * 把生成出来的开场白（[[角色名]] 分段文本）转成消息数组。
+     * 玩家角色的段落会被丢掉——那是用户自己要说的话。
+     * @param {string} opening 模型给的开场白
+     * @param {object[]} cast 本次生成的角色
+     * @param {string} youName 用户扮演的角色名
+     */
+    function openingToMessages(opening, cast, youName) {
+      const text = typeof opening === 'string' ? opening.trim() : ''
+      if (text === '') return []
+      const names = new Set(cast.map((c) => c.name))
+      const segs = parseSegments(text)
+      const out = []
+      for (const seg of segs) {
+        if (typeof seg.text !== 'string' || seg.text.trim() === '') continue
+        // 用户本人的台词不写进来
+        if (youName !== '' && seg.speaker === youName) continue
+        const isNarr = seg.speaker === '旁白'
+        // 模型偶尔会漏标记，兜底归给第一个非玩家角色
+        const fallback = cast.find((c) => c.name !== youName)?.name ?? cast[0]?.name ?? '角色'
+        const speaker = isNarr ? '' : names.has(seg.speaker) ? seg.speaker : fallback
+        out.push({
+          role: isNarr ? 'narrator' : 'assistant',
+          speaker,
+          text: seg.text.trim(),
+          time: Date.now() + out.length,
+        })
+      }
+      return out
+    }
+
+    /**
+     * 修复模型生成的不合法 JSON：主要是字符串值里未转义的英文直引号。
+     *
+     * 思路：逐字符扫描，跟踪「当前是否在字符串内部」。
+     * 只有出现在「值的位置」且后面紧跟结构字符（, } ] :) 或行尾的引号，才算字符串结束；
+     * 其余在值内部的引号一律当作普通字符转义掉。
+     * 同时把常见的中文直引号残留、末尾多余逗号一并处理。
+     *
+     * @returns {string | null} 修复后的文本；无法修复返回 null
+     */
+    function repairJsonQuotes(text) {
+      if (typeof text !== 'string' || text === '') return null
+      const out = []
+      const stack = [] // 容器栈：'obj' | 'arr'
+      let inString = false
+      let escaped = false
+      let afterColon = false // 刚读完冒号：下一个字符串一定是「值」
+
+      /** 当前容器里，字符串应当被当作「键」还是「值」 */
+      const topIsObject = () => stack.length > 0 && stack[stack.length - 1] === 'obj'
+
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i]
+
+        if (inString) {
+          if (escaped) {
+            out.push(ch)
+            escaped = false
+            continue
+          }
+          if (ch === '\\') {
+            out.push(ch)
+            escaped = true
+            continue
+          }
+          if (ch === '"') {
+            // 找到后面第一个非空白字符，用它判断这个引号是不是真正的结尾
+            let j = i + 1
+            while (j < text.length && /\s/.test(text[j])) j += 1
+            const next = text[j]
+            // 字符串结束的合法后续：逗号、右括号、冒号（键后面）、行尾
+            const isRealEnd =
+              next === ',' || next === '}' || next === ']' || next === ':' || next === undefined
+            // 对象里「值」位置开头的字符串，如果后面是 : 说明其实是个键（模型漏了值）
+            const asKey = topIsObject() && !afterColon && next === ':'
+            if (isRealEnd || asKey) {
+              out.push(ch)
+              inString = false
+              if (next === ':') afterColon = true
+              else afterColon = false
+              continue
+            }
+            // 否则是值内部未转义的引号 → 转义掉
+            out.push('\\"')
+            continue
+          }
+          out.push(ch)
+          continue
+        }
+
+        // —— 字符串外部 ——
+        if (ch === '"') {
+          inString = true
+          out.push(ch)
+          continue
+        }
+        if (ch === ':') {
+          afterColon = true
+          out.push(ch)
+          continue
+        }
+        if (ch === ',') {
+          afterColon = false
+          out.push(ch)
+          continue
+        }
+        if (ch === '{') {
+          stack.push('obj')
+          afterColon = false
+          out.push(ch)
+          continue
+        }
+        if (ch === '[') {
+          stack.push('arr')
+          afterColon = false
+          out.push(ch)
+          continue
+        }
+        if (ch === '}' || ch === ']') {
+          stack.pop()
+          afterColon = false
+          out.push(ch)
+          continue
+        }
+        out.push(ch)
+      }
+
+      let repaired = out.join('')
+      // 收尾清理：对象/数组里多余的逗号，如 [1,2,] 或 {"a":1,}
+      repaired = repaired.replace(/,\s*([}\]])/g, '$1')
+      // 只要有改动就交回去；没改动说明修不了，让调用方保留原始报错。
+      return repaired !== text ? repaired : null
+    }
+
+    /** 解析模型给的一个角色对象，中文字段名和纯字符串都认。 */
     function normalizeCastCard(raw) {
       // 模型只给了名字时，先造一张只有名字的卡，细节留空由用户补。
       if (typeof raw === 'string') {
         const only = raw.trim()
         if (only === '') return null
-        return { name: only, avatar: '🎭', persona: '', scenario: '', greeting: '', desire: '', guard: '' }
+        return { name: only, avatar: '🎭', gender: '', persona: '', scenario: '', greeting: '', desire: '', guard: '' }
       }
       if (raw === null || typeof raw !== 'object') return null
       let src = raw
@@ -410,9 +651,13 @@ window.__ModuleLoader__.load({
       if (name === '') return null
       const avatarRaw = pick(['avatar', '头像', 'emoji', '表情'])
       const avatar = /^[\p{Extended_Pictographic}\uFE0F]{1,4}$/u.test(avatarRaw) ? avatarRaw : '🎭'
+      // 性别：只认男/女，其余留空
+      const gRaw = pick(['gender', '性别', 'sex'])
+      const gender = /男/.test(gRaw) ? '男' : /女/.test(gRaw) ? '女' : ''
       return {
         name,
         avatar,
+        gender,
         persona: pick(['persona', '人设', '人物设定', '性格', '设定', '角色设定']),
         scenario: pick(['scenario', '情景', '世界观', '场景', '背景设定']),
         greeting: pick(['greeting', '开场白']),
@@ -508,22 +753,26 @@ window.__ModuleLoader__.load({
           let acc = ''
           try {
             const system = buildStoryPrompt(story, castList, mode)
-            const userText = `【目前为止的对话】\n${buildTranscript(history)}\n\n请据此写出接下来的 2～4 段。`
+            const playerName = castList.find((c) => c.id === story.playAsId)?.name ?? ''
+            const userText = `【目前为止的对话】\n${buildTranscript(history, playerName)}\n\n请据此写出接下来的 2～4 段。`
             const text = await hubRef.current.complete(system, userText, { temperature: 0.9, maxTokens: 1600 })
             if (text === null) throw new Error(t('errorModel'))
             acc = text
             setLive(acc)
             const segments = parseSegments(acc)
             const nameSet = new Set(castList.map((c) => c.name))
-            const appended = segments.map((seg) => {
-              const known = nameSet.has(seg.speaker) ? seg.speaker : seg.speaker === '旁白' ? '' : seg.speaker
-              return {
-                role: seg.speaker === '旁白' ? 'narrator' : 'assistant',
-                speaker: known || castList[0]?.name || '角色',
-                text: seg.text,
-                time: Date.now(),
-              }
-            })
+            // 玩家角色由用户本人说话，AI 写了也丢掉，避免替用户开口。
+            const appended = segments
+              .filter((seg) => !(playerName !== '' && seg.speaker === playerName))
+              .map((seg) => {
+                const known = nameSet.has(seg.speaker) ? seg.speaker : seg.speaker === '旁白' ? '' : seg.speaker
+                return {
+                  role: seg.speaker === '旁白' ? 'narrator' : 'assistant',
+                  speaker: known || castList[0]?.name || '角色',
+                  text: seg.text,
+                  time: Date.now(),
+                }
+              })
             updateStory(story.id, { messages: [...history, ...appended] })
           } catch (e) {
             setError(e instanceof Error ? e.message : String(e))
@@ -539,7 +788,9 @@ window.__ModuleLoader__.load({
       const send = useCallback(async () => {
         const text = input.trim()
         if (text === '' || streaming || !selected || cast.length < 2) return
-        const history = [...messages, { role: 'user', text, time: Date.now() }]
+        // 记下用户这次是以哪个角色身份说的话，气泡上就能显示对的名字。
+        const asId = typeof selected.playAsId === 'string' ? selected.playAsId : null
+        const history = [...messages, { role: 'user', text, asId, time: Date.now() }]
         setInput('')
         updateStory(selected.id, { messages: history })
         await runStoryCompletion(selected, cast, history)
@@ -651,7 +902,16 @@ window.__ModuleLoader__.load({
             return
           }
           // 新卡刚写进主插件，立刻拉一次快照，否则编辑器的角色 chips 会缺新角色。
-          setCharacters(hubRef.current.getCharacters())
+          const fresh = hubRef.current.getCharacters()
+          setCharacters(fresh)
+          // 把 AI 指定的「用户角色」名字翻译成 id，存进故事里。
+          const youId = fresh.find((c) => c.name === draft.youName)?.id ?? null
+          const playAsId = youId !== null && characterIds.includes(youId) ? youId : (characterIds[0] ?? null)
+          // 开场白随生成一起产出，进编辑器时就能看到戏已经开场了。
+          const castForOpening = characterIds
+            .map((id) => fresh.find((c) => c.id === id))
+            .filter(Boolean)
+          const openingMessages = openingToMessages(draft.opening, castForOpening, draft.youName)
           setCreateOpen(false)
           setCreatePlot('')
           setEditing({
@@ -659,7 +919,8 @@ window.__ModuleLoader__.load({
             title: draft.title,
             scene: draft.scene,
             characterIds,
-            messages: [],
+            playAsId,
+            messages: openingMessages,
           })
         } finally {
           setGeneratingStory(false)
@@ -676,23 +937,92 @@ window.__ModuleLoader__.load({
         const id = draft.id ?? newId()
         setStories((prev) => {
           const at = prev.findIndex((s) => s.id === id)
-          const record = { id, title, scene: draft.scene ?? '', characterIds: ids, messages: draft.messages ?? [] }
+          // 编辑器里生成过开场白就用它；否则沿用已有消息，新故事则为空。
+          const incoming = Array.isArray(draft.openingMessages) ? draft.openingMessages : null
+          const messages =
+            incoming !== null && incoming.length > 0
+              ? incoming
+              : at === -1
+                ? (draft.messages ?? [])
+                : (prev[at].messages ?? [])
+          const record = {
+            id,
+            title,
+            scene: draft.scene ?? '',
+            characterIds: ids,
+            playAsId: typeof draft.playAsId === 'string' && ids.includes(draft.playAsId) ? draft.playAsId : null,
+            messages,
+          }
           if (at === -1) return [...prev, record]
           const next = prev.slice()
-          next[at] = { ...next[at], ...record, messages: next[at].messages ?? [] }
+          next[at] = { ...next[at], ...record }
           return next
         })
         setEditing(null)
         setSelectedId(id)
       }
 
+      /**
+       * 编辑器里「生成开场白」：按当前标题/背景/阵容现写一段。
+       * @returns {{text: string, messages: object[]} | null}
+       */
+      const generateOpeningFor = useCallback(async (payload) => {
+        const hub = hubRef.current
+        if (!hub) return null
+        const ids = Array.isArray(payload?.characterIds) ? payload.characterIds : []
+        const castList = ids.map((id) => characters.find((c) => c.id === id)).filter(Boolean)
+        if (castList.length < 2) return null
+        const playerChar = castList.find((c) => c.id === payload?.playAsId) ?? null
+        const aiNames = castList.filter((c) => c.id !== playerChar?.id).map((c) => c.name)
+        // 用户演的就是 playerChar，性别跟着这个角色卡走。
+        const youGender =
+          playerChar?.gender === '男' || playerChar?.gender === '女' ? playerChar.gender : ''
+        const sys = `你要为一个多角色群像故事写开场白。
+
+【出场角色】
+${castList
+  .map((c) => `名字：${c.name}${c.gender ? `（${c.gender}）` : ''}${c.persona ? `\n设定：${c.persona.slice(0, 200)}` : ''}`)
+  .join('\n\n')}
+
+【故事背景】
+${payload?.scene ?? ''}
+
+【你只写这些角色】${aiNames.join('、')}${
+          playerChar === null ? '' : `\n【不要写】${playerChar.name}（那是用户本人扮演的，一个字都不要写）`
+        }${youGender === '' ? '' : `\n【用户的性别】${playerChar.name} 是${youGender === '男' ? '男性' : '女性'}，叙述时用「${youGender === '男' ? '他' : '她'}」相关的说法。`}
+
+【格式】每段以 [[角色名]] 独占一行开头，然后换行写台词与动作。只输出正文，不要解释、不要代码块标记。
+
+【要求】
+- 3～5 段，制造一个正在发生的小冲突或暧昧瞬间。
+- 动作、神态用全角括号，如（她把烟按灭）。
+- 结尾留出空档，让用户马上能接话。
+- 不要交代设定，直接开演。`
+        let text = null
+        try {
+          text = await hub.complete(sys, '请写出这个故事的开场白。', { temperature: 0.95, maxTokens: 900 })
+        } catch {
+          return null
+        }
+        if (text === null) return null
+        const clean = String(text).replace(/```[a-z]*|```/g, '').trim()
+        if (clean === '') return null
+        return {
+          text: clean,
+          messages: openingToMessages(clean, castList, playerChar?.name ?? ''),
+        }
+      }, [characters])
+
       // ---------- 渲染 ----------
 
       const rows = []
+      const playerChar = cast.find((c) => c.id === selected?.playAsId) ?? null
       messages.forEach((m, index) => {
         const isUser = m.role === 'user'
         const isNarrator = m.role === 'narrator'
         const char = cast.find((c) => c.name === m.speaker)
+        // 用户发言时显示他扮演的角色名，让人一眼看清「我」是谁。
+        const userName = isUser ? (playerChar?.name ?? t('you')) : ''
         rows.push(
           h(
             'div',
@@ -700,8 +1030,9 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'rp-who' },
+              isUser && playerChar !== null ? h(Avatar, { char: playerChar }) : null,
               !isUser && !isNarrator ? h(Avatar, { char: char ?? cast[0] }) : null,
-              isUser ? t('you') : isNarrator ? t('narrator') : m.speaker,
+              isUser ? userName : isNarrator ? t('narrator') : m.speaker,
               h('button', { className: 'rp-rewind', title: t('rewind'), disabled: streaming, onClick: () => rewindTo(index) }, '↩'),
             ),
             h(
@@ -736,6 +1067,7 @@ window.__ModuleLoader__.load({
           characters,
           onSave: saveStory,
           onCancel: () => setEditing(null),
+          onGenerateOpening: generateOpeningFor,
           onDelete: editing.id ? () => {
             deleteStory(editing.id)
             setEditing(null)
@@ -918,14 +1250,47 @@ window.__ModuleLoader__.load({
 
     // ---------- 故事编辑器 ----------
 
-    function StoryEditor({ t, draft, characters, onSave, onCancel, onDelete }) {
+    function StoryEditor({ t, draft, characters, onSave, onCancel, onDelete, onGenerateOpening }) {
       const [title, setTitle] = useState(draft.title ?? '')
       const [scene, setScene] = useState(draft.scene ?? '')
       const [characterIds, setCharacterIds] = useState(Array.isArray(draft.characterIds) ? draft.characterIds : [])
+      const [playAsId, setPlayAsId] = useState(draft.playAsId ?? null)
+      const [openingText, setOpeningText] = useState(typeof draft.openingText === 'string' ? draft.openingText : '')
+      const [openingMessages, setOpeningMessages] = useState(Array.isArray(draft.openingMessages) ? draft.openingMessages : [])
+      const [openingBusy, setOpeningBusy] = useState(false)
+      const [openingError, setOpeningError] = useState('')
+
+      // 生成开场白：由父组件调模型，结果回填到这里。
+      const runOpening = async (payload) => {
+        if (openingBusy || typeof onGenerateOpening !== 'function') return
+        setOpeningBusy(true)
+        setOpeningError('')
+        try {
+          const result = await onGenerateOpening(payload)
+          if (result === null || result === undefined) {
+            setOpeningError(t('openingFailed'))
+            return
+          }
+          setOpeningText(typeof result.text === 'string' ? result.text : '')
+          setOpeningMessages(Array.isArray(result.messages) ? result.messages : [])
+        } catch (e) {
+          setOpeningError(e instanceof Error ? e.message : String(e))
+        } finally {
+          setOpeningBusy(false)
+        }
+      }
 
       const toggle = (id) => {
-        setCharacterIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+        setCharacterIds((prev) => {
+          const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+          // 被移出阵容的角色不能再当「你」。
+          if (playAsId !== null && !next.includes(playAsId)) setPlayAsId(null)
+          return next
+        })
       }
+
+      // 只有已选进阵容的角色才能作为「你」。
+      const candidates = characters.filter((c) => characterIds.includes(c.id))
 
       return h(
         'div',
@@ -963,6 +1328,73 @@ window.__ModuleLoader__.load({
         ),
         h(
           'div',
+          { className: 'rp-field' },
+          h('label', null, t('playAs')),
+          h(
+            'div',
+            { className: 'rp-chips' },
+            h(
+              'button',
+              {
+                className: `rp-chip${playAsId === null ? ' on' : ''}`,
+                onClick: () => setPlayAsId(null),
+              },
+              '👁 ' + t('playAsNone'),
+            ),
+            candidates.map((c) =>
+              h(
+                'button',
+                {
+                  key: c.id,
+                  className: `rp-chip${playAsId === c.id ? ' on' : ''}`,
+                  onClick: () => setPlayAsId(c.id),
+                },
+                h(Avatar, { char: c, className: 'rp-chip-av' }),
+                c.name,
+              ),
+            ),
+          ),
+          h('div', { className: 'rp-hint' }, t('playAsHint')),
+        ),
+        h(
+          'div',
+          { className: 'rp-field' },
+          h('label', null, t('openingLabel')),
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+            openingText === ''
+              ? h('span', { className: 'rp-hint' }, t('openingEmpty'))
+              : h(
+                  'div',
+                  { className: 'rp-opening-preview' },
+                  openingText
+                    .split('\n')
+                    .slice(0, 6)
+                    .map((line, i) => h('div', { key: i, className: /^\[\[/.test(line.trim()) ? 'rp-opening-name' : '' }, line)),
+                ),
+          ),
+          h(
+            'div',
+            { style: { display: 'flex', gap: '8px', marginTop: '6px' } },
+            h(
+              'button',
+              {
+                className: 'rp-btn',
+                onClick: () => runOpening({ title, scene, characterIds, playAsId }),
+                disabled: openingBusy || characterIds.length < 2,
+              },
+              openingBusy ? t('openingGenerating') : openingText === '' ? t('openingGen') : t('openingRegen'),
+            ),
+            openingText === ''
+              ? null
+              : h('button', { className: 'rp-btn', onClick: () => { setOpeningText(''); setOpeningMessages([]) } }, t('openingClear')),
+          ),
+          h('div', { className: 'rp-hint' }, t('openingHint')),
+          openingError === '' ? null : h('div', { className: 'rp-err-text' }, openingError),
+        ),
+        h(
+          'div',
           { className: 'rp-editor-actions' },
           onDelete === undefined ? null : h('button', { className: 'rp-btn danger', onClick: onDelete }, t('delete')),
           h('button', { className: 'rp-btn', onClick: onCancel }, t('cancel')),
@@ -970,7 +1402,8 @@ window.__ModuleLoader__.load({
             'button',
             {
               className: 'rp-btn primary',
-              onClick: () => onSave({ ...draft, title, scene, characterIds }),
+              onClick: () =>
+                onSave({ ...draft, title, scene, characterIds, playAsId, openingMessages }),
               disabled: title.trim() === '' || characterIds.length < 2,
             },
             t('save'),
